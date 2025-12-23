@@ -105,7 +105,7 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
     }
     appStateContext?.dispatch({
       type: 'SET_FEEDBACK_STATE',
-      payload: { answerId: answer.message_id, feedback: newFeedbackState }
+      payload: { answerId: answer.message_id, feedback: Feedback.Neutral }
     })
   }
 
@@ -134,7 +134,7 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
     if (answer.message_id == undefined) return
     
     // NEW LOGIC: Combine feedback with text input for "Others"
-    let feedbackData = negativeFeedbackList.slice()
+    let feedbackData: string[] = negativeFeedbackList.slice()
     
     // Add text input to feedback if "Others" is selected and text is provided
     if (negativeFeedbackList.includes(Feedback.OtherUnhelpful) && otherUnhelpfulText.trim()) {

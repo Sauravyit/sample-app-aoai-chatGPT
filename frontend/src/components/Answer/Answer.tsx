@@ -2,7 +2,7 @@ import { FormEvent, useContext, useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { nord } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import { Checkbox, DefaultButton, Dialog, FontIcon, Stack, Text } from '@fluentui/react'
+import { Checkbox, DefaultButton, Dialog, FontIcon, Stack, Text, TextField } from '@fluentui/react'
 import { useBoolean } from '@fluentui/react-hooks'
 import { ThumbDislike20Filled, ThumbLike20Filled } from '@fluentui/react-icons'
 import DOMPurify from 'dompurify'
@@ -40,6 +40,11 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
   const [isFeedbackDialogOpen, setIsFeedbackDialogOpen] = useState(false)
   const [showReportInappropriateFeedback, setShowReportInappropriateFeedback] = useState(false)
   const [negativeFeedbackList, setNegativeFeedbackList] = useState<Feedback[]>([])
+  
+  // NEW STATE: Add state for text input when "Others" is selected
+  const [otherUnhelpfulText, setOtherUnhelpfulText] = useState('')
+  const [otherHarmfulText, setOtherHarmfulText] = useState('')
+  
   const appStateContext = useContext(AppStateContext)
   const FEEDBACK_ENABLED =
     appStateContext?.state.frontendSettings?.feedback_enabled && appStateContext?.state.isCosmosDBAvailable?.cosmosDB
@@ -50,73 +55,52 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
     toggleIsRefAccordionOpen()
   }
 
-  useEffect(() => {
-    setChevronIsExpanded(isRefAccordionOpen)
-  }, [isRefAccordionOpen])
-
-  useEffect(() => {
-    if (answer.message_id == undefined) return
-
-    let currentFeedbackState
-    if (appStateContext?.state.feedbackState && appStateContext?.state.feedbackState[answer.message_id]) {
-      currentFeedbackState = appStateContext?.state.feedbackState[answer.message_id]
-    } else {
-      currentFeedbackState = initializeAnswerFeedback(answer)
-    }
-    setFeedbackState(currentFeedbackState)
-  }, [appStateContext?.state.feedbackState, feedbackState, answer.message_id])
-
   const createCitationFilepath = (citation: Citation, index: number, truncate: boolean = false) => {
-    let citationFilename = ''
+    let citationFilepath = ''
 
-    if (citation.filepath) {
-      const part_i = citation.part_index ?? (citation.chunk_id ? parseInt(citation.chunk_id) + 1 : '')
+    if (citation.filepath && citation.chunk_id) {
       if (truncate && citation.filepath.length > filePathTruncationLimit) {
         const citationLength = citation.filepath.length
-        citationFilename = `${citation.filepath.substring(0, 20)}...${citation.filepath.substring(citationLength - 20)} - Part ${part_i}`
+        citationFilepath = `${citation.filepath.substring(0, 20)}...${citation.filepath.substring(citationLength - 20)} - Part ${citation.chunk_id}`
       } else {
-        citationFilename = `${citation.filepath} - Part ${part_i}`
+        citationFilepath = `${citation.filepath} - Part ${citation.chunk_id}`
       }
-    } else if (citation.filepath && citation.reindex_id) {
-      citationFilename = `${citation.filepath} - Part ${citation.reindex_id}`
+    } else if (citation.filepath && citation.filepath.length > filePathTruncationLimit && truncate) {
+      const citationLength = citation.filepath.length
+      citationFilepath = `${citation.filepath.substring(0, 20)}...${citation.filepath.substring(citationLength - 20)}`
     } else {
-      citationFilename = `Citation ${index}`
+      citationFilepath = `${citation.filepath ?? ''} `
     }
-    return citationFilename
+    return citationFilepath
   }
 
   const onLikeResponseClicked = async () => {
     if (answer.message_id == undefined) return
 
     let newFeedbackState = feedbackState
-    // Set or unset the thumbs up state
+
     if (feedbackState == Feedback.Positive) {
       newFeedbackState = Feedback.Neutral
+      await historyMessageFeedback(answer.message_id, Feedback.Neutral)
     } else {
       newFeedbackState = Feedback.Positive
+      await historyMessageFeedback(answer.message_id, Feedback.Positive)
     }
+    setFeedbackState(newFeedbackState)
+
     appStateContext?.dispatch({
       type: 'SET_FEEDBACK_STATE',
       payload: { answerId: answer.message_id, feedback: newFeedbackState }
     })
-    setFeedbackState(newFeedbackState)
-
-    // Update message feedback in db
-    await historyMessageFeedback(answer.message_id, newFeedbackState)
   }
 
   const onDislikeResponseClicked = async () => {
     if (answer.message_id == undefined) return
-
-    let newFeedbackState = feedbackState
-    if (feedbackState === undefined || feedbackState === Feedback.Neutral || feedbackState === Feedback.Positive) {
-      newFeedbackState = Feedback.Negative
-      setFeedbackState(newFeedbackState)
+    if (feedbackState == undefined || feedbackState == Feedback.Neutral || feedbackState == Feedback.Positive) {
       setIsFeedbackDialogOpen(true)
     } else {
       // Reset negative feedback to neutral
-      newFeedbackState = Feedback.Neutral
-      setFeedbackState(newFeedbackState)
+      setFeedbackState(Feedback.Neutral)
       await historyMessageFeedback(answer.message_id, Feedback.Neutral)
     }
     appStateContext?.dispatch({
@@ -134,6 +118,13 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
       feedbackList.push(selectedFeedback)
     } else {
       feedbackList = feedbackList.filter(f => f !== selectedFeedback)
+      
+      // NEW LOGIC: Clear text input when unchecking "Other" options
+      if (selectedFeedback === Feedback.OtherUnhelpful) {
+        setOtherUnhelpfulText('')
+      } else if (selectedFeedback === Feedback.OtherHarmful) {
+        setOtherHarmfulText('')
+      }
     }
 
     setNegativeFeedbackList(feedbackList)
@@ -141,7 +132,24 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
 
   const onSubmitNegativeFeedback = async () => {
     if (answer.message_id == undefined) return
-    await historyMessageFeedback(answer.message_id, negativeFeedbackList.join(','))
+    
+    // NEW LOGIC: Combine feedback with text input for "Others"
+    let feedbackData = negativeFeedbackList.slice()
+    
+    // Add text input to feedback if "Others" is selected and text is provided
+    if (negativeFeedbackList.includes(Feedback.OtherUnhelpful) && otherUnhelpfulText.trim()) {
+      feedbackData = feedbackData.map(f => 
+        f === Feedback.OtherUnhelpful ? `${f}: ${otherUnhelpfulText.trim()}` : f
+      )
+    }
+    
+    if (negativeFeedbackList.includes(Feedback.OtherHarmful) && otherHarmfulText.trim()) {
+      feedbackData = feedbackData.map(f => 
+        f === Feedback.OtherHarmful ? `${f}: ${otherHarmfulText.trim()}` : f
+      )
+    }
+    
+    await historyMessageFeedback(answer.message_id, feedbackData.join(','))
     resetFeedbackDialog()
   }
 
@@ -149,6 +157,9 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
     setIsFeedbackDialogOpen(false)
     setShowReportInappropriateFeedback(false)
     setNegativeFeedbackList([])
+    // NEW LOGIC: Reset text inputs
+    setOtherUnhelpfulText('')
+    setOtherHarmfulText('')
   }
 
   const UnhelpfulFeedbackContent = () => {
@@ -181,6 +192,25 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
             id={Feedback.OtherUnhelpful}
             defaultChecked={negativeFeedbackList.includes(Feedback.OtherUnhelpful)}
             onChange={updateFeedbackList}></Checkbox>
+            
+          {/* NEW COMPONENT: Text input for "Other" feedback */}
+          {negativeFeedbackList.includes(Feedback.OtherUnhelpful) && (
+            <TextField
+              placeholder="Please specify what made this response unhelpful..."
+              multiline
+              rows={3}
+              value={otherUnhelpfulText}
+              onChange={(_, newValue) => setOtherUnhelpfulText(newValue || '')}
+              styles={{
+                root: { marginLeft: '24px', marginTop: '8px' },
+                field: { 
+                  fontSize: '14px',
+                  border: '1px solid #d1d1d1',
+                  borderRadius: '4px'
+                }
+              }}
+            />
+          )}
         </Stack>
         <div onClick={() => setShowReportInappropriateFeedback(true)} style={{ color: '#115EA3', cursor: 'pointer' }}>
           Report inappropriate content
@@ -221,6 +251,25 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
             id={Feedback.OtherHarmful}
             defaultChecked={negativeFeedbackList.includes(Feedback.OtherHarmful)}
             onChange={updateFeedbackList}></Checkbox>
+            
+          {/* NEW COMPONENT: Text input for "Other" harmful content */}
+          {negativeFeedbackList.includes(Feedback.OtherHarmful) && (
+            <TextField
+              placeholder="Please specify the inappropriate content..."
+              multiline
+              rows={3}
+              value={otherHarmfulText}
+              onChange={(_, newValue) => setOtherHarmfulText(newValue || '')}
+              styles={{
+                root: { marginLeft: '24px', marginTop: '8px' },
+                field: { 
+                  fontSize: '14px',
+                  border: '1px solid #d1d1d1',
+                  borderRadius: '4px'
+                }
+              }}
+            />
+          )}
         </Stack>
       </>
     )
@@ -386,7 +435,7 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
                   background: '#FFFFFF',
                   boxShadow: '0px 14px 28.8px rgba(0, 0, 0, 0.24), 0px 0px 8px rgba(0, 0, 0, 0.2)',
                   borderRadius: '8px',
-                  maxHeight: '600px',
+                  maxHeight: '700px', // Increased to accommodate text input
                   minHeight: '100px'
                 }
               }
@@ -404,7 +453,14 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
 
           <div>By pressing submit, your feedback will be visible to the application owner.</div>
 
-          <DefaultButton disabled={negativeFeedbackList.length < 1} onClick={onSubmitNegativeFeedback}>
+          {/* NEW LOGIC: Enhanced submit validation to require text when "Others" is selected */}
+          <DefaultButton 
+            disabled={
+              negativeFeedbackList.length < 1 ||
+              (negativeFeedbackList.includes(Feedback.OtherUnhelpful) && !otherUnhelpfulText.trim()) ||
+              (negativeFeedbackList.includes(Feedback.OtherHarmful) && !otherHarmfulText.trim())
+            } 
+            onClick={onSubmitNegativeFeedback}>
             Submit
           </DefaultButton>
         </Stack>
